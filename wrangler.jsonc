@@ -4,7 +4,15 @@
   "main": "src/index.js",
   "compatibility_date": "2026-08-07",
   "compatibility_flags": ["nodejs_compat"],
+
   "observability": {
     "enabled": true
-  }
+  },
+
+  "kv_namespaces": [
+    {
+      "binding": "PUSH_SUBS",
+      "id": "c74cc3e33f2c408d93a7267300450a76"
+    }
+  ]
 }
