@@ -42,3 +42,5 @@ A /send végpont csak a Google Apps Scriptből lesz meghívva. A Plus jogosults�
 ellenőrzése továbbra is a szerveroldali Apps Scriptben történik. A felhasználó
 nem tud saját maga push értesítést küldeni, mert a PUSH_API_SECRET nincs a
 weboldalban és nincs az Android appban.
+
+Cloudflare Worker connected.
