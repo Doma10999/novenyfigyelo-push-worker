@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "novenyfigyelo-push",
-  "main": "src/index.js",
+  "main": "src/index-final.js",
 
   "keep_vars": true,
 
