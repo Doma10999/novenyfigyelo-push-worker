@@ -1,3 +1,5 @@
+// PUSH WORKER FINAL DEPLOY 2026-08-14
+
 import webpush from 'web-push';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 
