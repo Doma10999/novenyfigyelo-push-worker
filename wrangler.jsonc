@@ -2,6 +2,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "novenyfigyelo-push",
   "main": "src/index.js",
+
+  "keep_vars": true,
+
   "compatibility_date": "2026-08-07",
   "compatibility_flags": ["nodejs_compat"],
 
