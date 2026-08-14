@@ -1197,19 +1197,25 @@ function requireConfig(
    ENGEDÉLYEZETT ORIGINEK
    ========================================================= */
 
-function allowedOrigins(
-  env
-) {
-  return String(
-    env.ALLOWED_ORIGINS ||
-      'https://novenyfigyelo.netlify.app'
+function allowedOrigins(env) {
+  const defaults = [
+    "https://novenyfigyelo.netlify.app",
+    "https://noveny-figyelo.netlify.app"
+  ];
+
+  const configured = String(
+    env.ALLOWED_ORIGINS || ""
   )
-    .split(',')
-    .map(
-      (x) =>
-        x.trim()
-    )
+    .split(",")
+    .map((x) => x.trim())
     .filter(Boolean);
+
+  return [
+    ...new Set([
+      ...defaults,
+      ...configured
+    ])
+  ];
 }
 
 
