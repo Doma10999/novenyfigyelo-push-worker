@@ -518,3 +518,17 @@ function json(request, env, status, body) {
     env,
     new Response(JSON.stringify(body), {
       status,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      }
+    })
+  );
+}
+
+function httpError(status, publicMessage) {
+  const error = new Error(publicMessage);
+  error.status = status;
+  error.publicMessage = publicMessage;
+  return error;
+}
