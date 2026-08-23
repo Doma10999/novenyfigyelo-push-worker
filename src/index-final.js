@@ -31,7 +31,7 @@ export default {
         return json(request, env, 200, {
           ok: true,
           service: "Novenyfigyelo Push Worker",
-          version: "2.1.0"
+          version: "2.1.1"
         });
       }
 
@@ -322,6 +322,7 @@ async function sendToUser(env, uid, payload) {
   let removed = 0;
   let failed = 0;
   const valid = [];
+  const errors = [];
 
   for (const sub of list) {
     try {
@@ -349,9 +350,17 @@ async function sendToUser(env, uid, payload) {
         continue;
       }
 
+      const message = cleanText(error?.message || "push_failed", 220);
+      const responseBody = cleanText(error?.body || "", 220);
+
       failed++;
       valid.push(sub);
-      console.error("Push send failed:", statusCode, error?.message || error);
+      errors.push({
+        statusCode,
+        message,
+        responseBody
+      });
+      console.error("Push send failed:", statusCode, message, responseBody);
     }
   }
 
@@ -360,7 +369,13 @@ async function sendToUser(env, uid, payload) {
     else await env.PUSH_SUBS.delete(key);
   }
 
-  return { sent, removed, failed, subscriptions: valid.length };
+  return {
+    sent,
+    removed,
+    failed,
+    subscriptions: valid.length,
+    errors: errors.slice(0, 4)
+  };
 }
 
 function normalizeSubscription(raw) {
