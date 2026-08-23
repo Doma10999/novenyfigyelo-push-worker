@@ -5,6 +5,14 @@ const FIREBASE_JWKS = createRemoteJWKSet(
   new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com")
 );
 
+const PUSH_ADMIN_SERVICE_ACCOUNT =
+  "firebase-adminsdk-fbsvc@plant-monitor-3976f.iam.gserviceaccount.com";
+const PUSH_ADMIN_JWKS = createRemoteJWKSet(
+  new URL(
+    `https://www.googleapis.com/service_accounts/v1/jwk/${encodeURIComponent(PUSH_ADMIN_SERVICE_ACCOUNT)}`
+  )
+);
+
 const MAX_SUBSCRIPTIONS_PER_USER = 8;
 const DEFAULT_APP_URL = "https://noveny-figyelo.netlify.app/";
 const DEFAULT_ICON_URL = "https://noveny-figyelo.netlify.app/icon2.png";
@@ -23,7 +31,7 @@ export default {
         return json(request, env, 200, {
           ok: true,
           service: "Novenyfigyelo Push Worker",
-          version: "2.0.0"
+          version: "2.1.0"
         });
       }
 
@@ -123,16 +131,51 @@ export default {
         });
       }
 
-      if (request.method === "POST" && path === "/send") {
+      if (request.method === "POST" && path === "/test") {
         requireConfig(env, [
           "PUSH_SUBS",
-          "PUSH_API_SECRET",
+          "FIREBASE_PROJECT_ID",
+          "FIREBASE_DB_URL",
           "VAPID_PUBLIC_KEY",
           "VAPID_PRIVATE_KEY",
           "VAPID_SUBJECT"
         ]);
 
-        requireAdminSecret(request, env);
+        const auth = await verifyFirebaseUser(request, env);
+        const plus = await getPlusStatus(env, auth);
+        if (!plus.active) throw httpError(403, "plus_subscription_required");
+
+        const rateKey = `test-rate:${auth.uid}`;
+        if (await env.PUSH_SUBS.get(rateKey)) {
+          throw httpError(429, "test_rate_limited");
+        }
+
+        await env.PUSH_SUBS.put(rateKey, String(Date.now()), { expirationTtl: 30 });
+
+        const result = await sendToUser(env, auth.uid, {
+          title: "🌱 Növényfigyelő teszt",
+          body: "A push értesítés megfelelően működik ezen az eszközön.",
+          url: safeHttpsUrl(env.APP_URL || DEFAULT_APP_URL, DEFAULT_APP_URL),
+          icon: safeHttpsUrl(env.PUSH_ICON_URL || DEFAULT_ICON_URL, DEFAULT_ICON_URL),
+          badge: safeHttpsUrl(env.PUSH_BADGE_URL || DEFAULT_ICON_URL, DEFAULT_ICON_URL),
+          tag: "novenyfigyelo_test",
+          type: "test",
+          timestamp: Date.now()
+        });
+
+        if (!result.sent) throw httpError(409, "push_subscription_not_found");
+        return json(request, env, 200, { ok: true, uid: auth.uid, ...result });
+      }
+
+      if (request.method === "POST" && path === "/send") {
+        requireConfig(env, [
+          "PUSH_SUBS",
+          "VAPID_PUBLIC_KEY",
+          "VAPID_PRIVATE_KEY",
+          "VAPID_SUBJECT"
+        ]);
+
+        await requirePushAdmin(request, env);
         const body = await readJson(request);
         const uid = String(body.uid || "").trim();
         if (!uid) throw httpError(400, "uid_required");
@@ -353,11 +396,33 @@ function userSubsKey(uid) {
   return `subs:${uid}`;
 }
 
-function requireAdminSecret(request, env) {
+async function requirePushAdmin(request, env) {
   const supplied = String(request.headers.get("x-push-secret") || "");
   const expected = String(env.PUSH_API_SECRET || "");
 
-  if (!expected || !timingSafeEqualText(supplied, expected)) {
+  // A korábbi, titkos kulcsos szerverek továbbra is működnek.
+  if (expected && timingSafeEqualText(supplied, expected)) {
+    return;
+  }
+
+  const header = String(request.headers.get("authorization") || "");
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) throw httpError(401, "unauthorized");
+
+  const target = new URL(request.url);
+  const audience = `${target.origin}${target.pathname}`;
+
+  try {
+    await jwtVerify(match[1].trim(), PUSH_ADMIN_JWKS, {
+      issuer: PUSH_ADMIN_SERVICE_ACCOUNT,
+      subject: PUSH_ADMIN_SERVICE_ACCOUNT,
+      audience,
+      algorithms: ["RS256"],
+      maxTokenAge: "10m",
+      clockTolerance: 10
+    });
+  } catch (error) {
+    console.warn("Push admin token rejected:", error?.message || error);
     throw httpError(401, "unauthorized");
   }
 }
@@ -453,17 +518,3 @@ function json(request, env, status, body) {
     env,
     new Response(JSON.stringify(body), {
       status,
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store"
-      }
-    })
-  );
-}
-
-function httpError(status, publicMessage) {
-  const error = new Error(publicMessage);
-  error.status = status;
-  error.publicMessage = publicMessage;
-  return error;
-}
