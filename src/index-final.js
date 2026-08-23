@@ -16,6 +16,9 @@ const PUSH_ADMIN_JWKS = createRemoteJWKSet(
 const MAX_SUBSCRIPTIONS_PER_USER = 8;
 const DEFAULT_APP_URL = "https://noveny-figyelo.netlify.app/";
 const DEFAULT_ICON_URL = "https://noveny-figyelo.netlify.app/icon2.png";
+const VAPID_KEYPAIR_KV_KEY = "config:vapid-keypair:v2";
+
+let vapidKeyPairPromise = null;
 
 export default {
   async fetch(request, env) {
@@ -31,13 +34,14 @@ export default {
         return json(request, env, 200, {
           ok: true,
           service: "Novenyfigyelo Push Worker",
-          version: "2.1.1"
+          version: "2.2.0"
         });
       }
 
       if (request.method === "GET" && path === "/vapid-public-key") {
-        requireConfig(env, ["VAPID_PUBLIC_KEY"]);
-        return json(request, env, 200, { publicKey: String(env.VAPID_PUBLIC_KEY) });
+        requireConfig(env, ["PUSH_SUBS"]);
+        const vapid = await getVapidKeyPair(env);
+        return json(request, env, 200, { publicKey: vapid.publicKey });
       }
 
       if (request.method === "GET" && path === "/subscription-status") {
@@ -135,10 +139,7 @@ export default {
         requireConfig(env, [
           "PUSH_SUBS",
           "FIREBASE_PROJECT_ID",
-          "FIREBASE_DB_URL",
-          "VAPID_PUBLIC_KEY",
-          "VAPID_PRIVATE_KEY",
-          "VAPID_SUBJECT"
+          "FIREBASE_DB_URL"
         ]);
 
         const auth = await verifyFirebaseUser(request, env);
@@ -168,12 +169,7 @@ export default {
       }
 
       if (request.method === "POST" && path === "/send") {
-        requireConfig(env, [
-          "PUSH_SUBS",
-          "VAPID_PUBLIC_KEY",
-          "VAPID_PRIVATE_KEY",
-          "VAPID_SUBJECT"
-        ]);
+        requireConfig(env, ["PUSH_SUBS"]);
 
         await requirePushAdmin(request, env);
         const body = await readJson(request);
@@ -312,10 +308,11 @@ async function sendToUser(env, uid, payload) {
     return { sent: 0, removed: 0, failed: 0, subscriptions: 0 };
   }
 
+  const vapid = await getVapidKeyPair(env);
   webpush.setVapidDetails(
-    String(env.VAPID_SUBJECT),
-    String(env.VAPID_PUBLIC_KEY),
-    String(env.VAPID_PRIVATE_KEY)
+    validVapidSubject(env.VAPID_SUBJECT),
+    vapid.publicKey,
+    vapid.privateKey
   );
 
   let sent = 0;
@@ -355,11 +352,7 @@ async function sendToUser(env, uid, payload) {
 
       failed++;
       valid.push(sub);
-      errors.push({
-        statusCode,
-        message,
-        responseBody
-      });
+      errors.push({ statusCode, message, responseBody });
       console.error("Push send failed:", statusCode, message, responseBody);
     }
   }
@@ -376,6 +369,42 @@ async function sendToUser(env, uid, payload) {
     subscriptions: valid.length,
     errors: errors.slice(0, 4)
   };
+}
+
+async function getVapidKeyPair(env) {
+  if (!vapidKeyPairPromise) {
+    vapidKeyPairPromise = (async () => {
+      const saved = await env.PUSH_SUBS.get(VAPID_KEYPAIR_KV_KEY);
+
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (parsed?.publicKey && parsed?.privateKey) return parsed;
+        } catch {
+          // Sérült régi érték esetén alább új kulcspár készül.
+        }
+      }
+
+      const generated = webpush.generateVAPIDKeys();
+      const keyPair = {
+        publicKey: generated.publicKey,
+        privateKey: generated.privateKey
+      };
+
+      await env.PUSH_SUBS.put(VAPID_KEYPAIR_KV_KEY, JSON.stringify(keyPair));
+      return keyPair;
+    })().catch((error) => {
+      vapidKeyPairPromise = null;
+      throw error;
+    });
+  }
+
+  return vapidKeyPairPromise;
+}
+
+function validVapidSubject(value) {
+  const subject = String(value || "").trim();
+  return /^(mailto:|https:\/\/)/i.test(subject) ? subject : DEFAULT_APP_URL;
 }
 
 function normalizeSubscription(raw) {
@@ -489,61 +518,3 @@ function requireConfig(env, names) {
   for (const name of names) {
     if (!env[name]) throw httpError(500, `missing_config_${name.toLowerCase()}`);
   }
-}
-
-function allowedOrigins(env) {
-  const defaults = [
-    "https://novenyfigyelo.netlify.app",
-    "https://noveny-figyelo.netlify.app"
-  ];
-
-  const configured = String(env.ALLOWED_ORIGINS || "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  return [...new Set([...defaults, ...configured])];
-}
-
-function withCors(request, env, response) {
-  const origin = request.headers.get("origin") || "";
-  const headers = new Headers(response.headers);
-
-  if (origin && allowedOrigins(env).includes(origin)) {
-    headers.set("Access-Control-Allow-Origin", origin);
-    headers.set("Vary", "Origin");
-  }
-
-  headers.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Push-Secret");
-  headers.set("Access-Control-Max-Age", "86400");
-  headers.set("X-Content-Type-Options", "nosniff");
-  headers.set("Referrer-Policy", "no-referrer");
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers
-  });
-}
-
-function json(request, env, status, body) {
-  return withCors(
-    request,
-    env,
-    new Response(JSON.stringify(body), {
-      status,
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store"
-      }
-    })
-  );
-}
-
-function httpError(status, publicMessage) {
-  const error = new Error(publicMessage);
-  error.status = status;
-  error.publicMessage = publicMessage;
-  return error;
-}
