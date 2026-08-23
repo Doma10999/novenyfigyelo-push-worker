@@ -518,3 +518,61 @@ function requireConfig(env, names) {
   for (const name of names) {
     if (!env[name]) throw httpError(500, `missing_config_${name.toLowerCase()}`);
   }
+}
+
+function allowedOrigins(env) {
+  const defaults = [
+    "https://novenyfigyelo.netlify.app",
+    "https://noveny-figyelo.netlify.app"
+  ];
+
+  const configured = String(env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return [...new Set([...defaults, ...configured])];
+}
+
+function withCors(request, env, response) {
+  const origin = request.headers.get("origin") || "";
+  const headers = new Headers(response.headers);
+
+  if (origin && allowedOrigins(env).includes(origin)) {
+    headers.set("Access-Control-Allow-Origin", origin);
+    headers.set("Vary", "Origin");
+  }
+
+  headers.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Push-Secret");
+  headers.set("Access-Control-Max-Age", "86400");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "no-referrer");
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+function json(request, env, status, body) {
+  return withCors(
+    request,
+    env,
+    new Response(JSON.stringify(body), {
+      status,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      }
+    })
+  );
+}
+
+function httpError(status, publicMessage) {
+  const error = new Error(publicMessage);
+  error.status = status;
+  error.publicMessage = publicMessage;
+  return error;
+}
