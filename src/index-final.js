@@ -14,7 +14,7 @@ const PUSH_ADMIN_JWKS = createRemoteJWKSet(
 );
 
 const MAX_SUBSCRIPTIONS_PER_USER = 8;
-const WORKER_VERSION = "2.3.0";
+const WORKER_VERSION = "2.3.1";
 const DEFAULT_APP_URL = "https://noveny-figyelo.netlify.app/";
 const VAPID_KEYPAIR_KV_KEY = "config:vapid-keypair:v2";
 const NOTIFICATION_ASSET_PREFIX = "/notification-assets/v1/";
@@ -578,7 +578,7 @@ async function sendToUser(env, uid, payload) {
         JSON.stringify(payload),
         {
           TTL: 60 * 60 * 6,
-          urgency: payload.type === "battery_critical" ? "high" : "normal",
+          urgency: ["soil_low", "air_bad", "battery_low", "battery_critical"].includes(payload.type) ? "high" : "normal",
           topic: sanitizeTopic(payload.tag)
         }
       );
