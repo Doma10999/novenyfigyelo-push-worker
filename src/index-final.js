@@ -14,7 +14,7 @@ const PUSH_ADMIN_JWKS = createRemoteJWKSet(
 );
 
 const MAX_SUBSCRIPTIONS_PER_USER = 8;
-const WORKER_VERSION = "2.3.1";
+const WORKER_VERSION = "2.3.2";
 const DEFAULT_APP_URL = "https://noveny-figyelo.netlify.app/";
 const VAPID_KEYPAIR_KV_KEY = "config:vapid-keypair:v2";
 const NOTIFICATION_ASSET_PREFIX = "/notification-assets/v1/";
@@ -527,11 +527,14 @@ async function getPlusStatus(env, auth) {
 
   if (expiresAt > 0 && expiresAt < 100000000000) expiresAt *= 1000;
 
+  const expiredByDate = expiresAt > 0 && expiresAt <= Date.now();
+  const canceledButPaid =
+    (status === "canceled" || status === "cancelled") &&
+    expiresAt > Date.now();
+
   const inactiveStatuses = new Set([
     "free",
     "inactive",
-    "canceled",
-    "cancelled",
     "expired",
     "incomplete",
     "incomplete_expired",
@@ -539,9 +542,10 @@ async function getPlusStatus(env, auth) {
     "paused"
   ]);
 
-  const active = plan === "plus" &&
-    !inactiveStatuses.has(status) &&
-    !(expiresAt > 0 && expiresAt <= Date.now());
+  const active =
+    plan === "plus" &&
+    !expiredByDate &&
+    (canceledButPaid || !inactiveStatuses.has(status));
 
   return { active, plan, status, expiresAt };
 }
