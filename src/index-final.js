@@ -5,6 +5,11 @@ const FIREBASE_JWKS = createRemoteJWKSet(
   new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com")
 );
 
+const GOOGLE_USERINFO_URL =
+  "https://openidconnect.googleapis.com/v1/userinfo";
+const PUSH_ADMIN_GOOGLE_EMAIL_HASH =
+  "7r1Wps33o5R-FhjTWF5TtuPnLqjU4fitXsdDBgqvB_8";
+
 const PUSH_ADMIN_SERVICE_ACCOUNT =
   "firebase-adminsdk-fbsvc@plant-monitor-3976f.iam.gserviceaccount.com";
 const PUSH_ADMIN_JWKS = createRemoteJWKSet(
@@ -14,7 +19,7 @@ const PUSH_ADMIN_JWKS = createRemoteJWKSet(
 );
 
 const MAX_SUBSCRIPTIONS_PER_USER = 8;
-const WORKER_VERSION = "2.3.2";
+const WORKER_VERSION = "2.4.0";
 const DEFAULT_APP_URL = "https://noveny-figyelo.netlify.app/";
 const VAPID_KEYPAIR_KV_KEY = "config:vapid-keypair:v2";
 const NOTIFICATION_ASSET_PREFIX = "/notification-assets/v1/";
@@ -747,11 +752,13 @@ async function requirePushAdmin(request, env) {
   const match = header.match(/^Bearer\s+(.+)$/i);
   if (!match) throw httpError(401, "unauthorized");
 
+  const token = match[1].trim();
   const target = new URL(request.url);
   const audience = `${target.origin}${target.pathname}`;
+  let legacyError = "";
 
   try {
-    await jwtVerify(match[1].trim(), PUSH_ADMIN_JWKS, {
+    await jwtVerify(token, PUSH_ADMIN_JWKS, {
       issuer: PUSH_ADMIN_SERVICE_ACCOUNT,
       subject: PUSH_ADMIN_SERVICE_ACCOUNT,
       audience,
@@ -759,10 +766,82 @@ async function requirePushAdmin(request, env) {
       maxTokenAge: "10m",
       clockTolerance: 10
     });
+    return;
   } catch (error) {
-    console.warn("Push admin token rejected:", error?.message || error);
-    throw httpError(401, "unauthorized");
+    legacyError = cleanText(error?.message || "legacy_token_rejected", 120);
   }
+
+  try {
+    if (await verifyGoogleOwnerAccessToken(token)) return;
+  } catch (error) {
+    console.warn(
+      "Google owner token verification failed:",
+      cleanText(error?.message || "verification_failed", 120)
+    );
+  }
+
+  console.warn("Push admin token rejected:", legacyError || "not_allowed");
+  throw httpError(401, "unauthorized");
+}
+
+async function verifyGoogleOwnerAccessToken(token) {
+  const response = await fetch(GOOGLE_USERINFO_URL, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json"
+    },
+    cache: "no-store"
+  });
+
+  if (!response.ok) return false;
+
+  let profile;
+  try {
+    profile = await response.json();
+  } catch {
+    return false;
+  }
+
+  const verified =
+    profile?.email_verified === true ||
+    profile?.email_verified === "true" ||
+    profile?.verified_email === true;
+
+  if (!verified) return false;
+
+  const canonicalEmail = canonicalGoogleEmail(profile?.email);
+  if (!canonicalEmail) return false;
+
+  const actualHash = await sha256Base64Url(canonicalEmail);
+  return timingSafeEqualText(actualHash, PUSH_ADMIN_GOOGLE_EMAIL_HASH);
+}
+
+function canonicalGoogleEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  const at = email.lastIndexOf("@");
+  if (at <= 0) return "";
+
+  let local = email.slice(0, at);
+  let domain = email.slice(at + 1);
+
+  if (domain === "gmail.com" || domain === "googlemail.com") {
+    local = local.split("+")[0].replace(/\./g, "");
+    domain = "gmail.com";
+  }
+
+  return local && domain ? `${local}@${domain}` : "";
+}
+
+async function sha256Base64Url(value) {
+  const bytes = new TextEncoder().encode(String(value || ""));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 function timingSafeEqualText(a, b) {
