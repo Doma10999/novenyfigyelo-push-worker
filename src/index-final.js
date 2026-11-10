@@ -19,7 +19,7 @@ const PUSH_ADMIN_JWKS = createRemoteJWKSet(
 );
 
 const MAX_SUBSCRIPTIONS_PER_USER = 8;
-const WORKER_VERSION = "2.4.0";
+const WORKER_VERSION = "2.5.0";
 const DEFAULT_APP_URL = "https://noveny-figyelo.netlify.app/";
 const VAPID_KEYPAIR_KV_KEY = "config:vapid-keypair:v2";
 const NOTIFICATION_ASSET_PREFIX = "/notification-assets/v1/";
@@ -286,18 +286,16 @@ export default {
         requireConfig(env, ["PUSH_SUBS", "FIREBASE_PROJECT_ID", "FIREBASE_DB_URL"]);
 
         const auth = await verifyFirebaseUser(request, env);
-        const plus = await getPlusStatus(env, auth);
+        const available = await hasRegisteredDevice(env, auth);
         const list = await readSubscriptions(env, userSubsKey(auth.uid));
 
         return json(request, env, 200, {
           ok: true,
           uid: auth.uid,
-          activePlus: plus.active,
-          available: plus.active,
-          plan: plus.plan,
-          status: plus.status,
-          expiresAt: plus.expiresAt,
-          enabled: plus.active && list.length > 0,
+          available,
+          // Older installations still read this response field.
+          activePlus: available,
+          enabled: available && list.length > 0,
           subscriptions: list.length
         });
       }
@@ -306,11 +304,9 @@ export default {
         requireConfig(env, ["PUSH_SUBS", "FIREBASE_PROJECT_ID", "FIREBASE_DB_URL"]);
 
         const auth = await verifyFirebaseUser(request, env);
-        const plus = await getPlusStatus(env, auth);
+        const available = await hasRegisteredDevice(env, auth);
 
-        if (!plus.active) {
-          throw httpError(403, "plus_subscription_required");
-        }
+        if (!available) throw httpError(403, "device_required");
 
         const body = await readJson(request);
         const subscription = normalizeSubscription(body.subscription || body);
@@ -381,8 +377,8 @@ export default {
         ]);
 
         const auth = await verifyFirebaseUser(request, env);
-        const plus = await getPlusStatus(env, auth);
-        if (!plus.active) throw httpError(403, "plus_subscription_required");
+        const available = await hasRegisteredDevice(env, auth);
+        if (!available) throw httpError(403, "device_required");
 
         const rateKey = `test-rate:${auth.uid}`;
         if (await env.PUSH_SUBS.get(rateKey)) {
@@ -478,7 +474,7 @@ async function verifyFirebaseUser(request, env) {
     });
 
     const uid = String(result.payload.sub || "").trim();
-    if (!uid) throw new Error("missing_sub");
+    if (!uid || uid.startsWith("hw_") || result.payload.device === true) throw new Error("invalid_user");
 
     return {
       uid,
@@ -491,68 +487,29 @@ async function verifyFirebaseUser(request, env) {
   }
 }
 
-async function getPlusStatus(env, auth) {
+async function hasRegisteredDevice(env, auth) {
   const baseUrl = String(env.FIREBASE_DB_URL || "").trim().replace(/\/+$/, "");
   if (!baseUrl) throw httpError(500, "firebase_db_not_configured");
-  if (!auth?.uid || !auth?.token) throw httpError(401, "invalid_firebase_user");
 
-  const url = `${baseUrl}/users/${encodeURIComponent(auth.uid)}/subscription.json?auth=${encodeURIComponent(auth.token)}`;
-
+  const url = `${baseUrl}/users/${encodeURIComponent(auth.uid)}/devices.json?shallow=true&auth=${encodeURIComponent(auth.token)}`;
   let response;
   try {
-    response = await fetch(url, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      cache: "no-store"
-    });
-  } catch (error) {
-    console.error("Firebase subscription lookup failed:", error);
-    throw httpError(503, "subscription_check_unavailable");
+    response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+  } catch {
+    throw httpError(503, "device_check_unavailable");
   }
 
   if (response.status === 401 || response.status === 403) {
     throw httpError(403, "subscription_access_denied");
   }
+  if (!response.ok) throw httpError(503, "device_check_failed");
 
-  if (!response.ok) {
-    console.error("Firebase subscription lookup HTTP:", response.status);
-    throw httpError(503, "subscription_check_failed");
-  }
-
-  let subscription;
   try {
-    subscription = (await response.json()) || {};
+    const devices = await response.json();
+    return devices && typeof devices === "object" ? Object.keys(devices).length > 0 : false;
   } catch {
-    throw httpError(503, "subscription_data_invalid");
+    throw httpError(503, "device_data_invalid");
   }
-
-  const plan = String(subscription.plan || "free").trim().toLowerCase();
-  const status = String(subscription.status || "inactive").trim().toLowerCase();
-  let expiresAt = Number(subscription.expiresAt || 0);
-
-  if (expiresAt > 0 && expiresAt < 100000000000) expiresAt *= 1000;
-
-  const expiredByDate = expiresAt > 0 && expiresAt <= Date.now();
-  const canceledButPaid =
-    (status === "canceled" || status === "cancelled") &&
-    expiresAt > Date.now();
-
-  const inactiveStatuses = new Set([
-    "free",
-    "inactive",
-    "expired",
-    "incomplete",
-    "incomplete_expired",
-    "unpaid",
-    "paused"
-  ]);
-
-  const active =
-    plan === "plus" &&
-    !expiredByDate &&
-    (canceledButPaid || !inactiveStatuses.has(status));
-
-  return { active, plan, status, expiresAt };
 }
 
 async function sendToUser(env, uid, payload) {
@@ -706,12 +663,25 @@ function notificationAssetResponse(request, env, encodedAsset) {
   );
 }
 
+function isPushEndpoint(value) {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return false;
+    return url.hostname === "fcm.googleapis.com"
+      || url.hostname === "push.services.mozilla.com" || url.hostname.endsWith(".push.services.mozilla.com")
+      || url.hostname.endsWith(".push.apple.com") || url.hostname.endsWith(".notify.windows.com");
+  } catch {
+    return false;
+  }
+}
+
 function normalizeSubscription(raw) {
   const endpoint = String(raw?.endpoint || "").trim();
   const p256dh = String(raw?.keys?.p256dh || "").trim();
   const auth = String(raw?.keys?.auth || "").trim();
 
-  if (!endpoint.startsWith("https://")) throw httpError(400, "invalid_endpoint");
+  if (!isPushEndpoint(endpoint)) throw httpError(400, "invalid_endpoint");
   if (!p256dh || !auth) throw httpError(400, "missing_subscription_keys");
 
   return {
@@ -728,7 +698,7 @@ async function readSubscriptions(env, key) {
   try {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed)
-      ? parsed.filter((item) => item?.endpoint && item?.keys?.p256dh && item?.keys?.auth)
+      ? parsed.filter((item) => isPushEndpoint(item?.endpoint) && item?.keys?.p256dh && item?.keys?.auth)
       : [];
   } catch {
     return [];
